@@ -174,8 +174,17 @@ async function detectProductsWithHuggingFace(imageBuffer) {
       const assumedImageWidth = 640;
       const assumedImageHeight = 480;
       
+      console.log(`📊 Hugging Face raw results: ${data.length} items`);
+      
       return data
-        .filter((item) => item.score > 0.5) // Filter low confidence
+        .filter((item) => {
+          const score = item.score || 0;
+          if (score > 0.3) { // Lower threshold to 0.3 for more detections
+            console.log(`   ✓ ${item.label}: ${(score * 100).toFixed(1)}%`);
+            return true;
+          }
+          return false;
+        })
         .map((item, index) => {
           const box = item.box || {};
           const xmin = box.xmin ?? 0;
@@ -295,7 +304,8 @@ app.post('/api/detect-products', async (req, res) => {
         // Process labels as fallback (if no objects detected)
         if (detections.length === 0 && labelResult.labelAnnotations && labelResult.labelAnnotations.length > 0) {
           labelResult.labelAnnotations.forEach((label, index) => {
-            if (label.score > 0.7) {
+            if (label.score > 0.5) { // Lower threshold from 0.7 to 0.5
+              console.log(`   ✓ ${label.description}: ${(label.score * 100).toFixed(1)}%`);
               detections.push({
                 id: `gv-label-${index}`,
                 name: label.description || 'Product',
@@ -347,6 +357,11 @@ app.post('/api/detect-products', async (req, res) => {
       }
       // Return empty detections if services are configured but found nothing
       console.log('ℹ️  No products detected in image');
+      console.log('   Debug info:', {
+        visionClientConfigured: visionClient !== null,
+        huggingFaceConfigured: !!process.env.HUGGINGFACE_API_KEY,
+        usedProvider: usedProvider
+      });
     }
 
     // Return detections
