@@ -26,20 +26,31 @@ app.use(express.json({ limit: '10mb' }));
 
 // Initialize Google Vision client
 let visionClient = null;
+let googleCredentials = null;
 
 try {
-  // Option 1: Use service account key file (recommended for production)
-  if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
+  // Parse Google Cloud credentials from environment variable (Railway deployment)
+  if (process.env.GOOGLE_CLOUD_CREDENTIALS) {
+    googleCredentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+    visionClient = new ImageAnnotatorClient({
+      credentials: googleCredentials,
+    });
+    console.log('✅ Google Vision API initialized with Railway credentials');
+    console.log(`   Service Account: ${googleCredentials.client_email}`);
+    console.log(`   Project ID: ${googleCredentials.project_id}`);
+  }
+  // Option 1: Use service account key file (for local development)
+  else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     visionClient = new ImageAnnotatorClient({
       keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS,
     });
-    console.log('✅ Google Vision API initialized with service account credentials');
+    console.log('✅ Google Vision API initialized with service account file');
   }
-  // Option 2: Use service account JSON from environment variable (for cloud deployments)
+  // Option 2: Use service account JSON from environment variable (alternative name)
   else if (process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
-    const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
+    googleCredentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
     visionClient = new ImageAnnotatorClient({
-      credentials,
+      credentials: googleCredentials,
     });
     console.log('✅ Google Vision API initialized with service account JSON from env');
   }
@@ -49,8 +60,8 @@ try {
     console.log('✅ Google Vision API initialized with default credentials');
   }
 } catch (error) {
-  console.warn('⚠️  Google Vision API not initialized:', error.message);
-  console.warn('   Set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SERVICE_ACCOUNT_JSON to enable');
+  console.error('❌ Failed to initialize Google Vision API:', error.message);
+  console.warn('   Set GOOGLE_CLOUD_CREDENTIALS (Railway), GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_SERVICE_ACCOUNT_JSON to enable');
 }
 
 /**
@@ -201,6 +212,42 @@ app.get('/api/health', (req, res) => {
     visionApiConfigured: visionClient !== null,
     timestamp: new Date().toISOString(),
   });
+});
+
+/**
+ * Test authentication endpoint
+ * GET /test-auth
+ * Verifies Google Cloud credentials are loaded correctly
+ */
+app.get('/test-auth', async (req, res) => {
+  try {
+    const hasCredentials = !!process.env.GOOGLE_CLOUD_CREDENTIALS;
+    let creds = null;
+    
+    if (hasCredentials) {
+      try {
+        creds = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+      } catch (parseError) {
+        return res.status(500).json({ 
+          error: 'Failed to parse GOOGLE_CLOUD_CREDENTIALS',
+          details: parseError.message 
+        });
+      }
+    }
+    
+    res.json({
+      hasCredentials,
+      visionClientInitialized: visionClient !== null,
+      serviceAccount: creds?.client_email || null,
+      projectId: creds?.project_id || null,
+      credentialType: creds?.type || null,
+    });
+  } catch (error) {
+    res.status(500).json({ 
+      error: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+    });
+  }
 });
 
 /**

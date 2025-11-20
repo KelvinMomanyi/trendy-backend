@@ -46,7 +46,10 @@ You should see:
 In your frontend `.env` file (in the `trendy` directory):
 
 ```env
+# For local development:
 VITE_BACKEND_URL=http://localhost:3000
+# For production:
+# VITE_BACKEND_URL=https://trendy-backend-production.up.railway.app
 VITE_RECOGNITION_PROVIDER=backend
 ```
 

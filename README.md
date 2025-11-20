@@ -104,7 +104,7 @@ VITE_RECOGNITION_PROVIDER=backend
 Or for production:
 
 ```env
-VITE_BACKEND_URL=https://your-backend-domain.com
+VITE_BACKEND_URL=https://trendy-backend-production.up.railway.app
 VITE_RECOGNITION_PROVIDER=backend
 ```
 
