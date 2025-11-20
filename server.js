@@ -28,25 +28,42 @@ app.use(express.json({ limit: '10mb' }));
 let visionClient = null;
 let googleCredentials = null;
 
+// Debug: Check which credential environment variables are set
+console.log('🔍 Checking for Google Cloud credentials...');
+console.log('   GOOGLE_CLOUD_CREDENTIALS:', process.env.GOOGLE_CLOUD_CREDENTIALS ? 'SET (length: ' + process.env.GOOGLE_CLOUD_CREDENTIALS.length + ')' : 'NOT SET');
+console.log('   GOOGLE_APPLICATION_CREDENTIALS:', process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT SET');
+console.log('   GOOGLE_SERVICE_ACCOUNT_JSON:', process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? 'SET' : 'NOT SET');
+
 try {
   // Parse Google Cloud credentials from environment variable (Railway deployment)
   if (process.env.GOOGLE_CLOUD_CREDENTIALS) {
     try {
+      console.log('📝 Parsing GOOGLE_CLOUD_CREDENTIALS...');
       googleCredentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+      
+      // Validate required fields
+      if (!googleCredentials.type || !googleCredentials.project_id || !googleCredentials.private_key || !googleCredentials.client_email) {
+        throw new Error('Missing required fields in credentials. Required: type, project_id, private_key, client_email');
+      }
       
       // Fix private key if it has escaped newlines (common in environment variables)
       if (googleCredentials.private_key && typeof googleCredentials.private_key === 'string') {
         googleCredentials.private_key = googleCredentials.private_key.replace(/\\n/g, '\n');
       }
       
+      console.log('✅ Credentials parsed successfully');
+      console.log(`   Type: ${googleCredentials.type}`);
+      console.log(`   Project ID: ${googleCredentials.project_id}`);
+      console.log(`   Service Account: ${googleCredentials.client_email}`);
+      console.log(`   Private Key Length: ${googleCredentials.private_key?.length || 0}`);
+      
       visionClient = new ImageAnnotatorClient({
         credentials: googleCredentials,
       });
       console.log('✅ Google Vision API initialized with Railway credentials');
-      console.log(`   Service Account: ${googleCredentials.client_email}`);
-      console.log(`   Project ID: ${googleCredentials.project_id}`);
     } catch (parseError) {
       console.error('❌ Failed to parse GOOGLE_CLOUD_CREDENTIALS:', parseError.message);
+      console.error('   Error stack:', parseError.stack);
       throw parseError;
     }
   }
@@ -72,7 +89,17 @@ try {
   }
 } catch (error) {
   console.error('❌ Failed to initialize Google Vision API:', error.message);
+  console.error('   Error details:', {
+    name: error.name,
+    message: error.message,
+    stack: error.stack
+  });
   console.warn('   Set GOOGLE_CLOUD_CREDENTIALS (Railway), GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_SERVICE_ACCOUNT_JSON to enable');
+  console.warn('   Current env vars:', {
+    GOOGLE_CLOUD_CREDENTIALS: process.env.GOOGLE_CLOUD_CREDENTIALS ? 'SET' : 'NOT SET',
+    GOOGLE_APPLICATION_CREDENTIALS: process.env.GOOGLE_APPLICATION_CREDENTIALS || 'NOT SET',
+    GOOGLE_SERVICE_ACCOUNT_JSON: process.env.GOOGLE_SERVICE_ACCOUNT_JSON ? 'SET' : 'NOT SET'
+  });
 }
 
 /**
@@ -201,24 +228,39 @@ app.post('/api/detect-products', async (req, res) => {
       });
     }
     
-    if (error.message?.includes('Permission denied') || error.message?.includes('authentication') || error.message?.includes('401') || error.message?.includes('403')) {
+    if (error.message?.includes('Permission denied') || error.message?.includes('authentication') || error.message?.includes('401') || error.message?.includes('403') || error.message?.includes('Could not load the default credentials')) {
       console.error('❌ Google Vision API authentication error:', error.message);
       console.error('   Error details:', {
         code: error.code,
         message: error.message,
         hasCredentials: !!googleCredentials,
+        hasEnvVar: !!process.env.GOOGLE_CLOUD_CREDENTIALS,
         serviceAccount: googleCredentials?.client_email,
-        projectId: googleCredentials?.project_id
+        projectId: googleCredentials?.project_id,
+        visionClientInitialized: visionClient !== null
       });
+      
+      // Check if credentials are missing
+      if (!process.env.GOOGLE_CLOUD_CREDENTIALS && !process.env.GOOGLE_APPLICATION_CREDENTIALS && !process.env.GOOGLE_SERVICE_ACCOUNT_JSON) {
+        return res.status(503).json({ 
+          error: 'Google Cloud credentials not configured. Please set GOOGLE_CLOUD_CREDENTIALS environment variable in Railway.',
+          details: {
+            message: 'No credential environment variables found',
+            availableVars: Object.keys(process.env).filter(key => key.includes('GOOGLE'))
+          }
+        });
+      }
       
       return res.status(401).json({ 
         error: 'Authentication failed. Please check your Google Cloud service account credentials.',
-        details: process.env.NODE_ENV === 'development' ? {
+        details: {
           message: error.message,
           code: error.code,
-          serviceAccount: googleCredentials?.client_email,
-          projectId: googleCredentials?.project_id
-        } : undefined
+          hasCredentials: !!googleCredentials,
+          hasEnvVar: !!process.env.GOOGLE_CLOUD_CREDENTIALS,
+          serviceAccount: googleCredentials?.client_email || 'not loaded',
+          projectId: googleCredentials?.project_id || 'not loaded'
+        }
       });
     }
     
