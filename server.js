@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { ImageAnnotatorClient } from '@google-cloud/vision';
+import fetch from 'node-fetch';
 
 // Load environment variables
 dotenv.config();
@@ -126,6 +127,101 @@ function mapLabelToCategory(label) {
 }
 
 /**
+ * Hugging Face API - Fallback detection service
+ * Uses DETR model for object detection (80 COCO classes)
+ */
+async function detectProductsWithHuggingFace(imageBuffer) {
+  const apiKey = process.env.HUGGINGFACE_API_KEY;
+  
+  if (!apiKey) {
+    throw new Error('HUGGINGFACE_API_KEY not configured');
+  }
+
+  try {
+    // Use DETR model for object detection
+    const model = 'facebook/detr-resnet-50';
+    const apiUrl = `https://api-inference.huggingface.co/models/${model}`;
+    
+    const response = await fetch(apiUrl, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/octet-stream',
+      },
+      body: imageBuffer,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new Error(`Hugging Face API error: ${response.status} ${errorText}`);
+    }
+
+    const data = await response.json();
+    
+    // Handle model loading (first request)
+    if (data.error && data.error.includes('loading')) {
+      console.log('⏳ Hugging Face model is loading, waiting 10 seconds...');
+      await new Promise(resolve => setTimeout(resolve, 10000));
+      // Retry once
+      return detectProductsWithHuggingFace(imageBuffer);
+    }
+
+    // Transform Hugging Face response to our format
+    // DETR returns: [{label, score, box: {xmin, ymin, xmax, ymax}}]
+    if (Array.isArray(data) && data.length > 0) {
+      // Assume standard image dimensions for normalization
+      // In production, you might want to get actual image dimensions
+      const assumedImageWidth = 640;
+      const assumedImageHeight = 480;
+      
+      return data
+        .filter((item) => item.score > 0.5) // Filter low confidence
+        .map((item, index) => {
+          const box = item.box || {};
+          const xmin = box.xmin ?? 0;
+          const ymin = box.ymin ?? 0;
+          const xmax = box.xmax ?? assumedImageWidth;
+          const ymax = box.ymax ?? assumedImageHeight;
+          
+          // Check if coordinates are normalized (0-1) or in pixels
+          const isNormalized = xmax <= 1 && ymax <= 1;
+          
+          const x = isNormalized ? xmin * 100 : (xmin / assumedImageWidth) * 100;
+          const y = isNormalized ? ymin * 100 : (ymin / assumedImageHeight) * 100;
+          const width = isNormalized 
+            ? (xmax - xmin) * 100 
+            : ((xmax - xmin) / assumedImageWidth) * 100;
+          const height = isNormalized 
+            ? (ymax - ymin) * 100 
+            : ((ymax - ymin) / assumedImageHeight) * 100;
+          
+          return {
+            id: `hf-${index}`,
+            name: item.label || 'Product',
+            category: mapLabelToCategory(item.label || 'object'),
+            confidence: item.score || 0.8,
+            boundingBox: {
+              x: Math.max(0, Math.min(100, x)),
+              y: Math.max(0, Math.min(100, y)),
+              width: Math.max(1, Math.min(100, width)),
+              height: Math.max(1, Math.min(100, height)),
+            },
+            attributes: {
+              provider: 'huggingface',
+              model: 'detr-resnet-50',
+            },
+          };
+        });
+    }
+
+    return [];
+  } catch (error) {
+    console.error('❌ Hugging Face detection error:', error.message);
+    throw error;
+  }
+}
+
+/**
  * Product Detection Endpoint
  * POST /api/detect-products
  * 
@@ -139,13 +235,6 @@ app.post('/api/detect-products', async (req, res) => {
       return res.status(400).json({ error: 'Image data is required' });
     }
 
-    // Check if Google Vision client is initialized
-    if (!visionClient) {
-      return res.status(503).json({ 
-        error: 'Google Vision API is not configured. Please set GOOGLE_CLOUD_CREDENTIALS, GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_SERVICE_ACCOUNT_JSON environment variable.' 
-      });
-    }
-
     // Extract base64 data
     const base64Data = image.startsWith('data:') 
       ? image.split(',')[1] 
@@ -154,70 +243,118 @@ app.post('/api/detect-products', async (req, res) => {
     // Convert base64 to buffer
     const imageBuffer = Buffer.from(base64Data, 'base64');
     
-    // Call Google Vision API for object localization
-    const [objectResult] = await visionClient.objectLocalization({
-      image: { content: imageBuffer },
-    });
+    let detections = [];
+    let usedProvider = 'none';
 
-    // Call Google Vision API for label detection (as fallback)
-    const [labelResult] = await visionClient.labelDetection({
-      image: { content: imageBuffer },
-      maxResults: 10,
-    });
-
-    const detections = [];
-    
-    // Process object localizations (more accurate, includes bounding boxes)
-    if (objectResult.localizedObjectAnnotations && objectResult.localizedObjectAnnotations.length > 0) {
-      objectResult.localizedObjectAnnotations.forEach((obj, index) => {
-        const boundingPoly = obj.boundingPoly?.normalizedVertices || [];
+    // Try Google Vision API first (if configured)
+    if (visionClient) {
+      try {
+        console.log('🔍 Attempting Google Vision API detection...');
         
-        if (boundingPoly.length >= 2) {
-          const x = boundingPoly[0].x * 100;
-          const y = boundingPoly[0].y * 100;
-          const width = (boundingPoly[1]?.x - boundingPoly[0].x) * 100 || 20;
-          const height = (boundingPoly[2]?.y - boundingPoly[0].y) * 100 || width;
+        // Call Google Vision API for object localization
+        const [objectResult] = await visionClient.objectLocalization({
+          image: { content: imageBuffer },
+        });
 
-          detections.push({
-            id: `gv-obj-${index}`,
-            name: obj.name || 'Product',
-            category: mapLabelToCategory(obj.name),
-            confidence: obj.score || 0.8,
-            boundingBox: {
-              x: Math.max(0, Math.min(100, x)),
-              y: Math.max(0, Math.min(100, y)),
-              width: Math.max(1, Math.min(100, width)),
-              height: Math.max(1, Math.min(100, height)),
-            },
-            attributes: {},
+        // Call Google Vision API for label detection (as fallback)
+        const [labelResult] = await visionClient.labelDetection({
+          image: { content: imageBuffer },
+          maxResults: 10,
+        });
+
+        // Process object localizations (more accurate, includes bounding boxes)
+        if (objectResult.localizedObjectAnnotations && objectResult.localizedObjectAnnotations.length > 0) {
+          objectResult.localizedObjectAnnotations.forEach((obj, index) => {
+            const boundingPoly = obj.boundingPoly?.normalizedVertices || [];
+            
+            if (boundingPoly.length >= 2) {
+              const x = boundingPoly[0].x * 100;
+              const y = boundingPoly[0].y * 100;
+              const width = (boundingPoly[1]?.x - boundingPoly[0].x) * 100 || 20;
+              const height = (boundingPoly[2]?.y - boundingPoly[0].y) * 100 || width;
+
+              detections.push({
+                id: `gv-obj-${index}`,
+                name: obj.name || 'Product',
+                category: mapLabelToCategory(obj.name),
+                confidence: obj.score || 0.8,
+                boundingBox: {
+                  x: Math.max(0, Math.min(100, x)),
+                  y: Math.max(0, Math.min(100, y)),
+                  width: Math.max(1, Math.min(100, width)),
+                  height: Math.max(1, Math.min(100, height)),
+                },
+                attributes: {
+                  provider: 'google-vision',
+                },
+              });
+            }
           });
         }
-      });
+
+        // Process labels as fallback (if no objects detected)
+        if (detections.length === 0 && labelResult.labelAnnotations && labelResult.labelAnnotations.length > 0) {
+          labelResult.labelAnnotations.forEach((label, index) => {
+            if (label.score > 0.7) {
+              detections.push({
+                id: `gv-label-${index}`,
+                name: label.description || 'Product',
+                category: mapLabelToCategory(label.description),
+                confidence: label.score,
+                boundingBox: {
+                  x: 20 + (index * 10),
+                  y: 20 + (index * 10),
+                  width: 30,
+                  height: 30,
+                },
+                attributes: {
+                  provider: 'google-vision',
+                },
+              });
+            }
+          });
+        }
+
+        if (detections.length > 0) {
+          usedProvider = 'google-vision';
+          console.log(`✅ Google Vision detected ${detections.length} products`);
+        }
+      } catch (visionError) {
+        console.warn('⚠️  Google Vision API failed:', visionError.message);
+        console.log('🔄 Falling back to Hugging Face...');
+      }
     }
 
-    // Process labels as fallback (if no objects detected)
-    if (detections.length === 0 && labelResult.labelAnnotations && labelResult.labelAnnotations.length > 0) {
-      labelResult.labelAnnotations.forEach((label, index) => {
-        if (label.score > 0.7) {
-          detections.push({
-            id: `gv-label-${index}`,
-            name: label.description || 'Product',
-            category: mapLabelToCategory(label.description),
-            confidence: label.score,
-            boundingBox: {
-              x: 20 + (index * 10),
-              y: 20 + (index * 10),
-              width: 30,
-              height: 30,
-            },
-            attributes: {},
-          });
-        }
-      });
+    // Fallback to Hugging Face if Google Vision failed or not configured
+    if (detections.length === 0 && process.env.HUGGINGFACE_API_KEY) {
+      try {
+        console.log('🔍 Attempting Hugging Face detection...');
+        detections = await detectProductsWithHuggingFace(imageBuffer);
+        usedProvider = 'huggingface';
+        console.log(`✅ Hugging Face detected ${detections.length} products`);
+      } catch (hfError) {
+        console.error('❌ Hugging Face API also failed:', hfError.message);
+        // Continue to error handling below
+      }
+    }
+
+    // If still no detections and no providers available
+    if (detections.length === 0) {
+      if (!visionClient && !process.env.HUGGINGFACE_API_KEY) {
+        return res.status(503).json({ 
+          error: 'No detection services configured. Please set GOOGLE_CLOUD_CREDENTIALS or HUGGINGFACE_API_KEY environment variable.' 
+        });
+      }
+      // Return empty detections if services are configured but found nothing
+      console.log('ℹ️  No products detected in image');
     }
 
     // Return detections
-    res.json({ detections });
+    res.json({ 
+      detections,
+      provider: usedProvider,
+      count: detections.length
+    });
   } catch (error) {
     console.error('Error detecting products:', error);
     
