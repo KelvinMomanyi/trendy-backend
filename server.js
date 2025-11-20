@@ -31,13 +31,24 @@ let googleCredentials = null;
 try {
   // Parse Google Cloud credentials from environment variable (Railway deployment)
   if (process.env.GOOGLE_CLOUD_CREDENTIALS) {
-    googleCredentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
-    visionClient = new ImageAnnotatorClient({
-      credentials: googleCredentials,
-    });
-    console.log('✅ Google Vision API initialized with Railway credentials');
-    console.log(`   Service Account: ${googleCredentials.client_email}`);
-    console.log(`   Project ID: ${googleCredentials.project_id}`);
+    try {
+      googleCredentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+      
+      // Fix private key if it has escaped newlines (common in environment variables)
+      if (googleCredentials.private_key && typeof googleCredentials.private_key === 'string') {
+        googleCredentials.private_key = googleCredentials.private_key.replace(/\\n/g, '\n');
+      }
+      
+      visionClient = new ImageAnnotatorClient({
+        credentials: googleCredentials,
+      });
+      console.log('✅ Google Vision API initialized with Railway credentials');
+      console.log(`   Service Account: ${googleCredentials.client_email}`);
+      console.log(`   Project ID: ${googleCredentials.project_id}`);
+    } catch (parseError) {
+      console.error('❌ Failed to parse GOOGLE_CLOUD_CREDENTIALS:', parseError.message);
+      throw parseError;
+    }
   }
   // Option 1: Use service account key file (for local development)
   else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -104,7 +115,7 @@ app.post('/api/detect-products', async (req, res) => {
     // Check if Google Vision client is initialized
     if (!visionClient) {
       return res.status(503).json({ 
-        error: 'Google Vision API is not configured. Please set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_SERVICE_ACCOUNT_JSON environment variable.' 
+        error: 'Google Vision API is not configured. Please set GOOGLE_CLOUD_CREDENTIALS, GOOGLE_APPLICATION_CREDENTIALS, or GOOGLE_SERVICE_ACCOUNT_JSON environment variable.' 
       });
     }
 
@@ -186,13 +197,28 @@ app.post('/api/detect-products', async (req, res) => {
     // Provide helpful error messages
     if (error.message?.includes('API keys are not supported')) {
       return res.status(400).json({ 
-        error: 'Google Vision API requires OAuth2 authentication (service account), not API keys. Please configure GOOGLE_APPLICATION_CREDENTIALS with a service account key file.' 
+        error: 'Google Vision API requires OAuth2 authentication (service account), not API keys. Please configure GOOGLE_CLOUD_CREDENTIALS with a service account JSON.' 
       });
     }
     
-    if (error.message?.includes('Permission denied') || error.message?.includes('authentication')) {
+    if (error.message?.includes('Permission denied') || error.message?.includes('authentication') || error.message?.includes('401') || error.message?.includes('403')) {
+      console.error('❌ Google Vision API authentication error:', error.message);
+      console.error('   Error details:', {
+        code: error.code,
+        message: error.message,
+        hasCredentials: !!googleCredentials,
+        serviceAccount: googleCredentials?.client_email,
+        projectId: googleCredentials?.project_id
+      });
+      
       return res.status(401).json({ 
-        error: 'Authentication failed. Please check your Google Cloud service account credentials.' 
+        error: 'Authentication failed. Please check your Google Cloud service account credentials.',
+        details: process.env.NODE_ENV === 'development' ? {
+          message: error.message,
+          code: error.code,
+          serviceAccount: googleCredentials?.client_email,
+          projectId: googleCredentials?.project_id
+        } : undefined
       });
     }
     
