@@ -146,11 +146,14 @@ async function detectProductsWithHuggingFace(imageBuffer) {
 
   try {
     // Use DETR model for object detection
+    // IMPORTANT: Using new router endpoint (old api-inference.huggingface.co is deprecated)
     const model = 'facebook/detr-resnet-50';
-    const apiUrl = `https://api-inference.huggingface.co/models/${model}`;
+    const apiUrl = `https://router.huggingface.co/models/${model}`;
     
     console.log('📡 Sending request to Hugging Face...');
     console.log('   URL:', apiUrl);
+    console.log('   Model:', model);
+    console.log('   Note: Using new router endpoint (api-inference.huggingface.co is deprecated)');
     const response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
