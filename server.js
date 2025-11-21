@@ -277,69 +277,127 @@ async function detectProductsWithHuggingFace(imageBuffer) {
 /**
  * Detect products using OWLv2 (Zero-shot object detection)
  * Best for e-commerce: Can detect specific product types with text prompts
+ * 
+ * NOTE: OWLv2 models may not be available via Hugging Face Inference API.
+ * This function will try multiple model variants and formats.
+ * If all fail, the caller should fall back to DETR.
  */
 async function detectProductsWithOWL(imageBuffer, textPrompts = ["shoe", "bag", "watch", "clothing", "sneaker", "handbag", "backpack", "sunglasses"]) {
   const apiKey = process.env.HUGGINGFACE_API_KEY;
-  const model = 'google/owlv2-base-patch16-ensemble';
   
   if (!apiKey) {
     throw new Error('HUGGINGFACE_API_KEY not configured');
   }
 
-  console.log('🦉 Using OWLv2 for detection with prompts:', textPrompts);
+  console.log('🦉 Attempting OWLv2 detection with prompts:', textPrompts);
   
-  try {
-    // OWLv2 uses the inference API with text prompts
-    // Try router endpoint first (new), fallback to api-inference if needed
-    const apiUrl = `https://router.huggingface.co/models/${model}`;
-    
-    // OWLv2 expects image as base64 string with text prompts
-    const response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        inputs: imageBuffer.toString('base64'),
-        parameters: {
-          candidate_labels: textPrompts,
-          threshold: 0.1 // Lower threshold for more detections
+  // Try different OWLv2 model variants
+  const models = [
+    'google/owlvit-base-patch32',
+    'google/owlv2-base-patch16-ensemble',
+    'google/owlvit-base-patch16'
+  ];
+  
+  for (const model of models) {
+    try {
+      console.log(`   Trying model: ${model}`);
+      
+      // Try router endpoint (new)
+      let apiUrl = `https://router.huggingface.co/models/${model}`;
+      
+      // OWLv2/OWLViT might need image as raw bytes with text prompts
+      // Try format 1: Image as raw bytes with JSON parameters
+      let response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          inputs: {
+            image: imageBuffer.toString('base64'),
+            text: textPrompts
+          }
+        }),
+      });
+
+      // If that fails, try format 2: Multipart form data
+      if (!response.ok && response.status === 404) {
+        console.log(`   Model ${model} not available via router, trying alternative format...`);
+        
+        // Try legacy api-inference endpoint
+        apiUrl = `https://api-inference.huggingface.co/models/${model}`;
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            inputs: {
+              image: imageBuffer.toString('base64'),
+              text: textPrompts
+            }
+          }),
+        });
+      }
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          console.log(`   ⚠️  Model ${model} not available (404)`);
+          continue; // Try next model
         }
-      }),
-    });
+        const errorText = await response.text();
+        throw new Error(`OWLv2 API error: ${response.status} ${errorText}`);
+      }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`OWLv2 API error: ${response.status} ${errorText}`);
-    }
+      const data = await response.json();
+      
+      // Handle model loading
+      if (data.error && data.error.includes('loading')) {
+        console.log(`   ⏳ Model ${model} is loading, waiting 10 seconds...`);
+        await new Promise(resolve => setTimeout(resolve, 10000));
+        // Retry once
+        return detectProductsWithOWL(imageBuffer, textPrompts);
+      }
 
-    const data = await response.json();
-    
-    // Handle model loading
-    if (data.error && data.error.includes('loading')) {
-      console.log('⏳ OWLv2 model is loading, waiting 10 seconds...');
-      await new Promise(resolve => setTimeout(resolve, 10000));
-      return detectProductsWithOWL(imageBuffer, textPrompts);
-    }
+      // Handle error responses
+      if (data.error) {
+        console.log(`   ⚠️  Model ${model} returned error: ${data.error}`);
+        continue; // Try next model
+      }
 
-    console.log('OWLv2 detections:', Array.isArray(data) ? data.length : 'unexpected format');
-    
-    if (!Array.isArray(data)) {
-      return [];
+      console.log(`   ✅ Model ${model} responded successfully`);
+      console.log('   OWLv2 response format:', Array.isArray(data) ? 'Array' : typeof data);
+      
+      // OWLv2 returns detections in format: [{label, score, box: {xmin, ymin, xmax, ymax}}]
+      if (Array.isArray(data) && data.length > 0) {
+        const detections = data.map((item, idx) => ({
+          id: `owl-${idx}`,
+          label: item.label || item.class || 'Product',
+          score: item.score || item.confidence || 0.5,
+          box: item.box || item.bbox || {
+            xmin: 0, ymin: 0, xmax: 1, ymax: 1
+          }
+        }));
+        
+        console.log(`   ✅ OWLv2 detected ${detections.length} products`);
+        return detections;
+      }
+      
+      // If response is not in expected format, try next model
+      console.log(`   ⚠️  Model ${model} returned unexpected format`);
+      continue;
+      
+    } catch (error) {
+      console.log(`   ⚠️  Model ${model} failed: ${error.message}`);
+      // Continue to next model
+      continue;
     }
-    
-    return data.map((item, idx) => ({
-      id: `owl-${idx}`,
-      label: item.label,
-      score: item.score,
-      box: item.box || {},
-      // Image will be cropped later in the main endpoint
-    }));
-  } catch (error) {
-    console.error('❌ OWLv2 detection error:', error.message);
-    throw error;
   }
+  
+  // If all models failed, throw error to trigger fallback
+  throw new Error('All OWLv2 model variants failed. OWLv2 may not be available via Inference API. Falling back to DETR.');
 }
 
 // ============================================
@@ -890,39 +948,63 @@ app.post('/api/detect-and-match', async (req, res) => {
     // STEP 1: Detect products in image
     let detections = [];
     
-    // Try OWLv2 first (better for e-commerce with text prompts)
-    if (process.env.HUGGINGFACE_API_KEY) {
-      try {
-        const prompts = textPrompts || ["shoe", "bag", "watch", "clothing", "sneaker", "handbag", "backpack", "sunglasses"];
-        detections = await detectProductsWithOWL(imageBuffer, prompts);
-        console.log(`✅ OWLv2 detected ${detections.length} products`);
-      } catch (owlError) {
-        console.warn('⚠️  OWLv2 failed, falling back to DETR:', owlError.message);
-        // Fallback to existing DETR detection
-        try {
-          detections = await detectProductsWithHuggingFace(imageBuffer);
-          // Transform DETR format to match OWLv2 format
-          detections = detections.map((det, idx) => ({
-            id: det.id,
-            label: det.name,
-            score: det.confidence,
-            box: {
-              xmin: (det.boundingBox.x / 100),
-              ymin: (det.boundingBox.y / 100),
-              xmax: ((det.boundingBox.x + det.boundingBox.width) / 100),
-              ymax: ((det.boundingBox.y + det.boundingBox.height) / 100)
-            },
-            imageBuffer: imageBuffer // Will crop later
-          }));
-        } catch (detrError) {
-          console.error('❌ Both OWLv2 and DETR failed');
-          throw detrError;
-        }
-      }
-    } else {
+    if (!process.env.HUGGINGFACE_API_KEY) {
       return res.status(503).json({ 
         error: 'HUGGINGFACE_API_KEY not configured. Required for detect-and-match endpoint.' 
       });
+    }
+    
+    // Use DETR as primary method (more reliable via Inference API)
+    // OWLv2 is not consistently available via Inference API
+    try {
+      console.log('🔍 Using DETR for product detection...');
+      detections = await detectProductsWithHuggingFace(imageBuffer);
+      
+      // Transform DETR format to match expected format
+      detections = detections.map((det, idx) => ({
+        id: det.id,
+        label: det.name,
+        score: det.confidence,
+        box: {
+          xmin: (det.boundingBox.x / 100),
+          ymin: (det.boundingBox.y / 100),
+          xmax: ((det.boundingBox.x + det.boundingBox.width) / 100),
+          ymax: ((det.boundingBox.y + det.boundingBox.height) / 100)
+        }
+      }));
+      
+      console.log(`✅ DETR detected ${detections.length} products`);
+      
+      // Optional: Try OWLv2 as enhancement (non-blocking)
+      if (detections.length === 0 && textPrompts) {
+        console.log('   Trying OWLv2 as enhancement...');
+        try {
+          const owlDetections = await detectProductsWithOWL(imageBuffer, textPrompts);
+          if (owlDetections.length > 0) {
+            console.log(`   ✅ OWLv2 found ${owlDetections.length} additional products`);
+            detections = owlDetections;
+          }
+        } catch (owlError) {
+          console.log(`   ⚠️  OWLv2 not available: ${owlError.message}`);
+          // Continue with DETR results (or empty if DETR also found nothing)
+        }
+      }
+    } catch (detrError) {
+      console.error('❌ DETR detection failed:', detrError.message);
+      
+      // Last resort: Try OWLv2
+      if (textPrompts) {
+        try {
+          console.log('   Attempting OWLv2 as fallback...');
+          detections = await detectProductsWithOWL(imageBuffer, textPrompts);
+          console.log(`   ✅ OWLv2 detected ${detections.length} products`);
+        } catch (owlError) {
+          console.error('❌ Both DETR and OWLv2 failed');
+          throw new Error(`Product detection failed. DETR error: ${detrError.message}. OWLv2 error: ${owlError.message}`);
+        }
+      } else {
+        throw detrError;
+      }
     }
     
     if (detections.length === 0) {
