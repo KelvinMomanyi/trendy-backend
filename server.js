@@ -1722,7 +1722,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { ImageAnnotatorClient } from '@google-cloud/vision';
-import { InferenceClient } from 'huggingface_hub';  // Official client (2025+)
+import { HfInference } from '@huggingface/inference';  // ← Correct import
 import sharp from 'sharp';
 
 dotenv.config();
@@ -1730,33 +1730,25 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
-app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'], allowedHeaders: ['Content-Type', 'Authorization'] }));
+app.use(cors({ origin: '*', methods: ['GET', 'POST', 'OPTIONS'] }));
 app.options('*', cors());
 app.use(express.json({ limit: '10mb' }));
 
-// ==================== GOOGLE VISION SETUP (unchanged) ====================
+// ==================== GOOGLE VISION SETUP ====================
 let visionClient = null;
-let googleCredentials = null;
-
-console.log('🔍 Checking for Google Cloud credentials...');
 try {
   if (process.env.GOOGLE_CLOUD_CREDENTIALS) {
-    googleCredentials = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
-    if (googleCredentials.private_key) {
-      googleCredentials.private_key = googleCredentials.private_key.replace(/\\n/g, '\n');
-    }
-    visionClient = new ImageAnnotatorClient({ credentials: googleCredentials });
-    console.log('✅ Google Vision initialized (Railway)');
+    let creds = JSON.parse(process.env.GOOGLE_CLOUD_CREDENTIALS);
+    creds.private_key = creds.private_key.replace(/\\n/g, '\n');
+    visionClient = new ImageAnnotatorClient({ credentials: creds });
   } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
     visionClient = new ImageAnnotatorClient({ keyFilename: process.env.GOOGLE_APPLICATION_CREDENTIALS });
-    console.log('✅ Google Vision initialized (local file)');
   } else {
     visionClient = new ImageAnnotatorClient();
-    console.log('✅ Google Vision initialized (default)');
   }
-} catch (err) {
-  console.warn('⚠️ Google Vision failed to initialize:', err.message);
+  console.log('✅ Google Vision initialized');
+} catch (e) {
+  console.warn('⚠️ Google Vision not available:', e.message);
 }
 
 // ==================== CATEGORY MAPPING ====================
@@ -1773,188 +1765,139 @@ function mapLabelToCategory(label) {
   return 'accessories';
 }
 
-// ==================== HUGGING FACE CLIENT (2025+) ====================
-let hfClient = null;
-async function getHFClient() {
-  if (!hfClient) {
-    if (!process.env.HUGGINGFACE_API_KEY) {
-      throw new Error('HUGGINGFACE_API_KEY is required');
-    }
-    hfClient = new InferenceClient({ token: process.env.HUGGINGFACE_API_KEY });
-  }
-  return hfClient;
-}
+// ==================== HUGGING FACE CLIENT ====================
+const hf = process.env.HUGGINGFACE_API_KEY 
+  ? new HfInference(process.env.HUGGINGFACE_API_KEY)
+  : null;
+
+if (!hf) console.warn('⚠️ HUGGINGFACE_API_KEY missing → HF features disabled');
 
 // ==================== OBJECT DETECTION (DETR) ====================
 async function detectProductsWithHuggingFace(imageBuffer) {
-  console.group('🤗 Hugging Face Object Detection (nielsr/detr-resnet-50)');
-  const client = await getHFClient();
+  if (!hf) throw new Error('Hugging Face not configured');
 
-  try {
-    const result = await client.objectDetection({
-      model: 'nielsr/detr-resnet-50',  // Only working DETR in 2025
-      inputs: imageBuffer,
-      threshold: 0.3,
-    });
+  console.group('🤗 Hugging Face DETR (nielsr/detr-resnet-50)');
+  const result = await hf.objectDetection({
+    model: 'nielsr/detr-resnet-50',   // Only reliably working DETR in 2025
+    inputs: imageBuffer,
+    threshold: 0.3,
+  });
 
-    if (!Array.isArray(result)) {
-      throw new Error('Invalid response from Hugging Face');
-    }
+  const detections = result.map((item, i) => {
+    const b = item.box;
+    return {
+      id: `hf-${i}`,
+      name: item.label || 'Product',
+      category: mapLabelToCategory(item.label),
+      confidence: item.score,
+      boundingBox: {
+        x: b.xmin * 100,
+        y: b.ymin * 100,
+        width: (b.xmax - b.xmin) * 100,
+        height: (b.ymax - b.ymin) * 100,
+      },
+      attributes: { provider: 'huggingface', model: 'nielsr/detr-resnet-50' },
+    };
+  });
 
-    const detections = result.map((item, i) => {
-      const box = item.box;
-      const isNorm = box.xmax <= 1;
-
-      return {
-        id: `hf-${i}`,
-        name: item.label || 'Product',
-        category: mapLabelToCategory(item.label),
-        confidence: item.score,
-        boundingBox: {
-          x: Math.max(0, Math.min(100, (isNorm ? box.xmin : box.xmin / 800) * 100)),
-          y: Math.max(0, Math.min(100, (isNorm ? box.ymin : box.ymin / 800) * 100)),
-          width: Math.max(1, Math.min(100, (isNorm ? box.xmax - box.xmin : (box.xmax - box.xmin) / 800) * 100)),
-          height: Math.max(1, Math.min(100, (isNorm ? box.ymax - box.ymin : (box.ymax - box.ymin) / 800) * 100)),
-        },
-        attributes: { provider: 'huggingface', model: 'nielsr/detr-resnet-50' },
-      };
-    });
-
-    console.log(`✅ Detected ${detections.length} objects`);
-    console.groupEnd();
-    return detections;
-  } catch (err) {
-    console.error('❌ Hugging Face DETR failed:', err.message);
-    console.groupEnd();
-    throw err;
-  }
+  console.log(`✅ ${detections.length} detections`);
+  console.groupEnd();
+  return detections;
 }
 
 // ==================== EMBEDDINGS ====================
 async function generateEmbeddingDINO(imageBuffer) {
-  const client = await getHFClient();
-  const result = await client.featureExtraction({
+  if (!hf) throw new Error('HF not configured');
+  return await hf.featureExtraction({
     model: 'facebook/dinov2-base',
     inputs: imageBuffer,
   });
-  return Array.isArray(result) ? result : result[0];
 }
 
 async function generateEmbeddingCLIP(imageBuffer) {
-  const client = await getHFClient();
-  const result = await client.featureExtraction({
+  if (!hf) throw new Error('HF not configured');
+  return await hf.featureExtraction({
     model: 'openai/clip-vit-large-patch14',
     inputs: imageBuffer,
   });
-  return Array.isArray(result) ? result : result[0];
 }
 
-// ==================== IMAGE CROPPING ====================
-async function cropImage(imageBuffer, box) {
+// ==================== IMAGE CROPPING & SIMILARITY ====================
+async function cropImage(buf, box) {
   try {
-    if (!box) return imageBuffer;
-    const { width, height } = await sharp(imageBuffer).metadata();
-    if (!width || !height) return imageBuffer;
-
-    const isNorm = box.xmax <= 1;
-    const left = Math.floor(isNorm ? box.xmin * width : box.xmin);
-    const top = Math.floor(isNorm ? box.ymin * height : box.ymin);
-    const w = Math.floor(isNorm ? (box.xmax - box.xmin) * width : box.xmax - box.xmin);
-    const h = Math.floor(isNorm ? (box.ymax - box.ymin) * height : box.ymax - box.ymin);
-
-    if (w <= 0 || h <= 0) return imageBuffer;
-
-    return await sharp(imageBuffer)
-      .extract({ left, top, width: w, height: h })
-      .toBuffer();
-  } catch (err) {
-    console.error('Crop failed:', err.message);
-    return imageBuffer;
+    const { width, height } = await sharp(buf).metadata();
+    const left   = Math.floor(box.xmin * width);
+    const top    = Math.floor(box.ymin * height);
+    const w      = Math.floor((box.xmax - box.xmin) * width);
+    const h      = Math.floor((box.ymax - box.ymin) * height);
+    if (w <= 0 || h <= 0) return buf;
+    return await sharp(buf).extract({ left, top, width: w, height: h }).toBuffer();
+  } catch (e) {
+    return buf;
   }
 }
 
-// ==================== CATALOG & SIMILARITY ====================
 function cosineSimilarity(a, b) {
-  if (a.length !== b.length) return 0;
   let dot = 0, magA = 0, magB = 0;
   for (let i = 0; i < a.length; i++) {
     dot += a[i] * b[i];
-    magA += a[i] * a[i];
-    magB += b[i] * b[i];
+    magA += a[i] ** 2;
+    magB += b[i] ** 2;
   }
   return magA && magB ? dot / (Math.sqrt(magA) * Math.sqrt(magB)) : 0;
 }
 
-async function matchWithCatalog(embedding, catalog, topK = 5) {
-  if (!catalog.length) return [];
+async function matchWithCatalog(emb, catalog, k = 5) {
   return catalog
-    .map(item => ({ ...item, score: cosineSimilarity(embedding, item.embedding) }))
+    .map(item => ({ ...item, score: cosineSimilarity(emb, item.embedding) }))
     .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+    .slice(0, k);
 }
 
 let catalogEmbeddings = [];
 const getCatalogEmbeddings = () => catalogEmbeddings;
-const saveCatalogEmbeddings = (e) => { catalogEmbeddings = e; console.log(`Saved ${e.length} embeddings`); };
+const saveCatalogEmbeddings = (e) => { catalogEmbeddings = e; };
 
 // ==================== ENDPOINTS ====================
-
 app.post('/api/detect-products', async (req, res) => {
-  console.group('📸 /api/detect-products');
   try {
-    const { image } = req.body;
-    if (!image) return res.status(400).json({ error: 'Image required' });
-
-    const imageBuffer = Buffer.from(image.split(',')[1] || image, 'base64');
-    let detections = [];
-    let provider = 'none';
+    const imageBuffer = Buffer.from((req.body.image || '').split(',')[1] || req.body.image, 'base64');
+    let detections = [], provider = 'none';
 
     // Google Vision first
     if (visionClient) {
       try {
         const [result] = await visionClient.objectLocalization({ image: { content: imageBuffer } });
-        const objects = result.localizedObjectAnnotations || [];
-        detections = objects.map((obj, i) => {
-          const v = obj.boundingPoly.normalizedVertices;
-          const x = v[0].x * 100;
-          const y = v[0].y * 100;
-          const w = (v[1]?.x || 0.2) * 100 - x;
-          const h = (v[2]?.y || 0.2) * 100 - y;
+        detections = (result.localizedObjectAnnotations || []).map((o, i) => {
+          const v = o.boundingPoly.normalizedVertices;
           return {
             id: `gv-${i}`,
-            name: obj.name,
-            category: mapLabelToCategory(obj.name),
-            confidence: obj.score,
-            boundingBox: { x, y, width: w, height: h },
-            attributes: { provider: 'google-vision' },
+            name: o.name,
+            category: mapLabelToCategory(o.name),
+            confidence: o.score,
+            boundingBox: { x: v[0].x * 100, y: v[0].y * 100, width: (v[1].x - v[0].x) * 100, height: (v[2].y - v[0].y) * 100 },
+            attributes: { provider: 'google-vision' }
           };
         });
-        if (detections.length > 0) provider = 'google-vision';
-      } catch (e) { console.warn('Google Vision failed:', e.message); }
+        if (detections.length) provider = 'google-vision';
+      } catch (e) { console.warn('Google Vision failed'); }
     }
 
-    // Fallback to Hugging Face
-    if (detections.length === 0 && process.env.HUGGINGFACE_API_KEY) {
+    // HF fallback
+    if (!detections.length && hf) {
       detections = await detectProductsWithHuggingFace(imageBuffer);
       provider = 'huggingface';
     }
 
-    console.groupEnd();
     res.json({ detections, provider, count: detections.length });
   } catch (err) {
-    console.error('Error:', err.message);
-    console.groupEnd();
     res.status(500).json({ error: err.message });
   }
 });
 
 app.post('/api/detect-and-match', async (req, res) => {
-  console.group('🔍 /api/detect-and-match');
   try {
-    const { image, useCLIP } = req.body;
-    if (!image) return res.status(400).json({ error: 'Image required' });
-
-    const imageBuffer = Buffer.from(image.split(',')[1] || image, 'base64');
+    const imageBuffer = Buffer.from((req.body.image || '').split(',')[1] || req.body.image, 'base64');
     const detections = await detectProductsWithHuggingFace(imageBuffer);
 
     const results = [];
@@ -1966,52 +1909,27 @@ app.post('/api/detect-and-match', async (req, res) => {
         ymax: (det.boundingBox.y + det.boundingBox.height) / 100,
       };
       const cropped = await cropImage(imageBuffer, box);
-      const embedding = useCLIP
-        ? await generateEmbeddingCLIP(cropped)
-        : await generateEmbeddingDINO(cropped);
-
+      const embedding = req.body.useCLIP ? await generateEmbeddingCLIP(cropped) : await generateEmbeddingDINO(cropped);
       const matches = await matchWithCatalog(embedding, await getCatalogEmbeddings(), 5);
 
       results.push({
         detection: { label: det.name, confidence: det.confidence, boundingBox: box },
-        matches: matches.map(m => ({
-          productId: m.id,
-          name: m.name,
-          similarity: m.score,
-          price: m.price,
-          imageUrl: m.imageUrl,
-          url: m.url,
-          category: m.category,
-        })),
+        matches: matches.map(m => ({ productId: m.id, name: m.name, similarity: m.score, price: m.price, imageUrl: m.imageUrl, url: m.url, category: m.category }))
       });
     }
-
-    console.groupEnd();
     res.json({ success: true, results });
   } catch (err) {
-    console.error('Error:', err.message);
-    console.groupEnd();
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/catalog/compute-embeddings', async (req, res) => {
-  // ... your existing catalog code, just uses generateEmbeddingDINO/CLIP now ...
-});
+// Health
+app.get('/api/health', (req, res) => res.json({
+  status: 'ok',
+  date: new Date().toISOString().split('T')[0],
+  vision: !!visionClient,
+  huggingface: !!hf,
+  detrModel: 'nielsr/detr-resnet-50 (working Nov 2025)'
+}));
 
-app.get('/api/health', (req, res) => {
-  res.json({
-    status: 'ok',
-    date: '2025-11-21',
-    vision: !!visionClient,
-    huggingface: !!process.env.HUGGINGFACE_API_KEY,
-    detrModel: 'nielsr/detr-resnet-50 (working)',
-  });
-});
-
-app.get('/', (req, res) => res.json({ message: 'Shop Mini Backend – Fully Updated Nov 2025' }));
-
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
-  console.log(`✅ Using nielsr/detr-resnet-50 via InferenceClient`);
-});
+app.listen(PORT, () => console.log(`Server ready → http://localhost:${PORT}`));
