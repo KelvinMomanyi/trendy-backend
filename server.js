@@ -147,15 +147,16 @@ async function detectProductsWithHuggingFace(imageBuffer) {
 
   try {
     // Use DETR model for object detection
-    // IMPORTANT: Using new router endpoint (old api-inference.huggingface.co is deprecated)
     const model = 'facebook/detr-resnet-50';
-    const apiUrl = `https://router.huggingface.co/models/${model}`;
+    
+    // Try router endpoint first, fallback to legacy endpoint if 404
+    let apiUrl = `https://router.huggingface.co/models/${model}`;
     
     console.log('📡 Sending request to Hugging Face...');
     console.log('   URL:', apiUrl);
     console.log('   Model:', model);
-    console.log('   Note: Using new router endpoint (api-inference.huggingface.co is deprecated)');
-    const response = await fetch(apiUrl, {
+    
+    let response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -165,7 +166,24 @@ async function detectProductsWithHuggingFace(imageBuffer) {
     });
 
     console.log('📥 Response status:', response.status, response.statusText);
-    console.log('📥 Response headers:', Object.fromEntries(response.headers.entries()));
+
+    // If router endpoint returns 404, try legacy endpoint
+    if (response.status === 404) {
+      console.log('   ⚠️  Router endpoint returned 404, trying legacy endpoint...');
+      apiUrl = `https://api-inference.huggingface.co/models/${model}`;
+      console.log('   Trying legacy URL:', apiUrl);
+      
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/octet-stream',
+        },
+        body: imageBuffer,
+      });
+      
+      console.log('📥 Legacy endpoint response status:', response.status, response.statusText);
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -419,10 +437,10 @@ async function generateEmbeddingDINO(imageBuffer) {
   console.log('🧬 Generating DINOv2 embedding');
   
   try {
-    // Use router endpoint (new, recommended)
-    const apiUrl = `https://router.huggingface.co/models/${model}`;
+    // Try router endpoint first, fallback to legacy endpoint if 404
+    let apiUrl = `https://router.huggingface.co/models/${model}`;
     
-    const response = await fetch(apiUrl, {
+    let response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -430,6 +448,20 @@ async function generateEmbeddingDINO(imageBuffer) {
       },
       body: imageBuffer,
     });
+
+    // If router endpoint returns 404, try legacy endpoint
+    if (response.status === 404) {
+      console.log('   ⚠️  Router endpoint returned 404, trying legacy endpoint...');
+      apiUrl = `https://api-inference.huggingface.co/models/${model}`;
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'image/jpeg',
+        },
+        body: imageBuffer,
+      });
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -472,10 +504,10 @@ async function generateEmbeddingCLIP(imageBuffer) {
   console.log('🖼️ Generating CLIP embedding');
   
   try {
-    // Use router endpoint (new, recommended)
-    const apiUrl = `https://router.huggingface.co/models/${model}`;
+    // Try router endpoint first, fallback to legacy endpoint if 404
+    let apiUrl = `https://router.huggingface.co/models/${model}`;
     
-    const response = await fetch(apiUrl, {
+    let response = await fetch(apiUrl, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${apiKey}`,
@@ -483,6 +515,20 @@ async function generateEmbeddingCLIP(imageBuffer) {
       },
       body: imageBuffer,
     });
+
+    // If router endpoint returns 404, try legacy endpoint
+    if (response.status === 404) {
+      console.log('   ⚠️  Router endpoint returned 404, trying legacy endpoint...');
+      apiUrl = `https://api-inference.huggingface.co/models/${model}`;
+      response = await fetch(apiUrl, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'image/jpeg',
+        },
+        body: imageBuffer,
+      });
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
