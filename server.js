@@ -152,8 +152,7 @@ async function detectProductsWithHuggingFace(imageBuffer) {
     // Try different router endpoint formats
     // Note: router.huggingface.co may require different authentication or model availability
     const routerFormats = [
-      `https://router.huggingface.co/models/${model}`,  // Standard router format
-      `https://api-inference.huggingface.co/models/${model}`,  // Legacy (deprecated, returns 410)
+      `https://router.huggingface.co/models/${model}`  // Standard router format
     ];
     
     console.log('📡 Sending request to Hugging Face...');
