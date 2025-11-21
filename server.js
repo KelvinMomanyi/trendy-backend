@@ -152,7 +152,8 @@ async function detectProductsWithHuggingFace(imageBuffer) {
     // Try different router endpoint formats
     // Note: router.huggingface.co may require different authentication or model availability
     const routerFormats = [
-      `https://router.huggingface.co/models/${model}`  // Standard router format
+      `https://huggingface.co/${model}`,  // Standard router format
+      `https://api-inference.huggingface.co/models/${model}`,  // Legacy (deprecated, returns 410)
     ];
     
     console.log('📡 Sending request to Hugging Face...');
@@ -340,7 +341,7 @@ async function detectProductsWithOWL(imageBuffer, textPrompts = ["shoe", "bag", 
       console.log(`   Trying model: ${model}`);
       
       // Try router endpoint (new)
-      let apiUrl = `https://router.huggingface.co/models/${model}`;
+      let apiUrl = `https://huggingface.co/${model}`;
       
       // OWLv2/OWLViT might need image as raw bytes with text prompts
       // Try format 1: Image as raw bytes with JSON parameters
@@ -458,7 +459,7 @@ async function generateEmbeddingDINO(imageBuffer) {
   try {
     // Try different endpoint formats
     const endpointFormats = [
-      `https://router.huggingface.co/models/${model}`,
+      `https://huggingface.co/${model}`,
       `https://api-inference.huggingface.co/models/${model}`,  // Legacy (may return 410)
     ];
     
@@ -532,7 +533,7 @@ async function generateEmbeddingCLIP(imageBuffer) {
   try {
     // Try different endpoint formats
     const endpointFormats = [
-      `https://router.huggingface.co/models/${model}`,
+      `https://huggingface.co/${model}`,
       `https://api-inference.huggingface.co/models/${model}`,  // Legacy (may return 410)
     ];
     
