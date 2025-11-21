@@ -1610,51 +1610,110 @@ async function saveCatalogEmbeddings(e) {
 
 // Endpoints
 app.post('/api/detect-products', async (req, res) => {
-  // ... [your existing Google Vision logic — unchanged] ...
-
-  let detections = [];
-  let usedProvider = 'none';
-
-  // Try Google Vision first
-  if (visionClient) {
-    // ... [your full Google Vision block — unchanged] ...
-  }
-
-  // Fallback to Hugging Face DETR (now works!)
-  if (detections.length === 0 && process.env.HUGGINGFACE_API_KEY) {
-    try {
-      detections = await detectProductsWithHuggingFace(imageBuffer);
-      usedProvider = 'huggingface';
-    } catch (err) {
-      console.error('Hugging Face failed:', err.message);
+  try {
+    const { image } = req.body;
+    
+    if (!image) {
+      return res.status(400).json({ error: 'Image data is required' });
     }
-  }
 
-  res.json({ detections, provider: usedProvider, count: detections.length });
+    // Extract base64 data and convert to buffer
+    const base64Data = image.startsWith('data:') ? image.split(',')[1] : image;
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+
+    let detections = [];
+    let usedProvider = 'none';
+
+    // Try Google Vision first
+    if (visionClient) {
+      try {
+        const [objectResult] = await visionClient.objectLocalization({
+          image: { content: imageBuffer },
+        });
+        
+        if (objectResult.localizedObjectAnnotations?.length > 0) {
+          detections = objectResult.localizedObjectAnnotations.map((obj, index) => {
+            const boundingPoly = obj.boundingPoly?.normalizedVertices || [];
+            if (boundingPoly.length >= 2) {
+              const x = boundingPoly[0].x * 100;
+              const y = boundingPoly[0].y * 100;
+              const width = (boundingPoly[1]?.x - boundingPoly[0].x) * 100 || 20;
+              const height = (boundingPoly[2]?.y - boundingPoly[0].y) * 100 || width;
+
+              return {
+                id: `gv-obj-${index}`,
+                name: obj.name || 'Product',
+                category: mapLabelToCategory(obj.name),
+                confidence: obj.score || 0.8,
+                boundingBox: {
+                  x: Math.max(0, Math.min(100, x)),
+                  y: Math.max(0, Math.min(100, y)),
+                  width: Math.max(1, Math.min(100, width)),
+                  height: Math.max(1, Math.min(100, height)),
+                },
+                attributes: { provider: 'google-vision' },
+              };
+            }
+            return null;
+          }).filter(Boolean);
+          
+          if (detections.length > 0) {
+            usedProvider = 'google-vision';
+          }
+        }
+      } catch (visionError) {
+        console.warn('Google Vision failed:', visionError.message);
+      }
+    }
+
+    // Fallback to Hugging Face DETR (now works!)
+    if (detections.length === 0 && process.env.HUGGINGFACE_API_KEY) {
+      try {
+        detections = await detectProductsWithHuggingFace(imageBuffer);
+        usedProvider = 'huggingface';
+      } catch (err) {
+        console.error('Hugging Face failed:', err.message);
+      }
+    }
+
+    res.json({ detections, provider: usedProvider, count: detections.length });
+  } catch (error) {
+    console.error('Error detecting products:', error);
+    res.status(500).json({ error: error.message || 'Failed to detect products' });
+  }
 });
 
 app.post('/api/detect-and-match', async (req, res) => {
-  // ... [your existing preprocessing] ...
-
-  let detections = [];
   try {
-    detections = await detectProductsWithHuggingFace(imageBuffer);
+    const { image, textPrompts, useCLIP } = req.body;
+    
+    if (!image) {
+      return res.status(400).json({ error: 'Image data required' });
+    }
 
-    // Transform to normalized box format
-    detections = detections.map(det => ({
-      id: det.id,
-      label: det.name,
-      score: det.confidence,
-      box: {
-        xmin: det.boundingBox.x / 100,
-        ymin: det.boundingBox.y / 100,
-        xmax: (det.boundingBox.x + det.boundingBox.width) / 100,
-        ymax: (det.boundingBox.y + det.boundingBox.height) / 100,
-      },
-    }));
-  } catch (err) {
-    return res.status(500).json({ error: 'Detection failed: ' + err.message });
-  }
+    // Extract base64 data and convert to buffer
+    const base64Data = image.startsWith('data:') ? image.split(',')[1] : image;
+    const imageBuffer = Buffer.from(base64Data, 'base64');
+
+    let detections = [];
+    try {
+      detections = await detectProductsWithHuggingFace(imageBuffer);
+
+      // Transform to normalized box format
+      detections = detections.map(det => ({
+        id: det.id,
+        label: det.name,
+        score: det.confidence,
+        box: {
+          xmin: det.boundingBox.x / 100,
+          ymin: det.boundingBox.y / 100,
+          xmax: (det.boundingBox.x + det.boundingBox.width) / 100,
+          ymax: (det.boundingBox.y + det.boundingBox.height) / 100,
+        },
+      }));
+    } catch (err) {
+      return res.status(500).json({ error: 'Detection failed: ' + err.message });
+    }
 
   if (detections.length === 0) {
     return res.json({ message: 'No products detected', detections: [], matches: [] });
@@ -1689,6 +1748,10 @@ app.post('/api/detect-and-match', async (req, res) => {
   }
 
   res.json({ success: true, detections: results.length, results });
+  } catch (error) {
+    console.error('Error in detect-and-match:', error);
+    res.status(500).json({ error: error.message || 'Failed to detect and match products' });
+  }
 });
 
 // [Your catalog compute/get endpoints — unchanged except using fixed embedding functions]
