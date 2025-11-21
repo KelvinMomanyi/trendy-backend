@@ -1381,7 +1381,7 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { ImageAnnotatorClient } from '@google-cloud/vision';
-import fetch from 'node-fetch';
+import { HfInference } from '@huggingface/inference';
 import sharp from 'sharp';
 
 // Load environment variables
@@ -1420,135 +1420,81 @@ function mapLabelToCategory(label) {
   return 'accessories';
 }
 
-// FIXED: DETR Object Detection (facebook/detr-resnet-50) — WORKS NOV 2025
+// FIXED & SIMPLIFIED: Hugging Face InferenceClient (2025)
+let hfClient = null;
+async function getHFClient() {
+  if (!hfClient) {
+    if (!process.env.HUGGINGFACE_API_KEY) {
+      throw new Error('HUGGINGFACE_API_KEY missing');
+    }
+    hfClient = new HfInference(process.env.HUGGINGFACE_API_KEY);
+  }
+  return hfClient;
+}
+
+// FIXED & SIMPLIFIED: DETR via official InferenceClient (2025)
 async function detectProductsWithHuggingFace(imageBuffer) {
-  console.group('🤗 Hugging Face DETR Detection');
-  const apiKey = process.env.HUGGINGFACE_API_KEY;
-  if (!apiKey) throw new Error('HUGGINGFACE_API_KEY not configured');
+  console.group('🤗 Hugging Face DETR (nielsr/detr-resnet-50)');
+  const client = await getHFClient();
 
-  const ENDPOINT = 'https://router.huggingface.co/hf-inference/models/facebook/detr-resnet-50/object-detection';
+  // This model works reliably on the new Inference Providers (Nov 2025)
+  const result = await client.objectDetection({
+    model: 'nielsr/detr-resnet-50',
+    inputs: imageBuffer,
+    parameters: {
+      threshold: 0.3,
+    },
+  });
 
-  try {
-    console.log('Sending to:', ENDPOINT);
-    const response = await fetch(ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/octet-stream',
+  if (!Array.isArray(result)) {
+    console.groupEnd();
+    throw new Error('Unexpected response from HF');
+  }
+
+  const detections = result.map((item, i) => {
+    const box = item.box || {};
+    const isNorm = box.xmax <= 1 && box.xmax !== undefined;
+    const x = isNorm ? box.xmin * 100 : (box.xmin / 800) * 100;   // DETR usually outputs normalized
+    const y = isNorm ? box.ymin * 100 : (box.ymin / 800) * 100;
+    const width = isNorm ? (box.xmax - box.xmin) * 100 : (box.xmax - box.xmin) / 800 * 100;
+    const height = isNorm ? (box.ymax - box.ymin) * 100 : (box.ymax - box.ymin) / 800 * 100;
+
+    return {
+      id: `hf-${i}`,
+      name: item.label || 'Product',
+      category: mapLabelToCategory(item.label),
+      confidence: item.score,
+      boundingBox: {
+        x: Math.max(0, Math.min(100, x)),
+        y: Math.max(0, Math.min(100, y)),
+        width: Math.max(1, Math.min(100, width)),
+        height: Math.max(1, Math.min(100, height)),
       },
-      body: imageBuffer,
-    });
+      attributes: { provider: 'huggingface', model: 'nielsr/detr-resnet-50' },
+    };
+  });
 
-    if (!response.ok) {
-      const err = await response.text();
-      console.error('HF Error:', response.status, err);
-      throw new Error(`DETR failed: ${response.status} ${err}`);
-    }
-
-    const data = await response.json();
-
-    // Handle model loading
-    if (data.error?.includes('loading')) {
-      console.log('Model loading, retrying in 10s...');
-      await new Promise(r => setTimeout(r, 10000));
-      return detectProductsWithHuggingFace(imageBuffer);
-    }
-
-    if (!Array.isArray(data)) throw new Error('Unexpected DETR response');
-
-    const detections = data
-      .filter(item => item.score > 0.3)
-      .map((item, i) => {
-        const box = item.box || {};
-        const isNorm = box.xmax <= 1;
-        const x = isNorm ? box.xmin * 100 : (box.xmin / 640) * 100;
-        const y = isNorm ? box.ymin * 100 : (box.ymin / 480) * 100;
-        const width = isNorm ? (box.xmax - box.xmin) * 100 : ((box.xmax - box.xmin) / 640) * 100;
-        const height = isNorm ? (box.ymax - box.ymin) * 100 : ((box.ymax - box.ymin) / 480) * 100;
-
-        return {
-          id: `hf-${i}`,
-          name: item.label || 'Product',
-          category: mapLabelToCategory(item.label),
-          confidence: item.score,
-          boundingBox: {
-            x: Math.max(0, Math.min(100, x)),
-            y: Math.max(0, Math.min(100, y)),
-            width: Math.max(1, Math.min(100, width)),
-            height: Math.max(1, Math.min(100, height)),
-          },
-          attributes: { provider: 'huggingface', model: 'detr-resnet-50' },
-        };
-      });
-
-    console.log(`Processed ${detections.length} detections`);
-    console.groupEnd();
-    return detections;
-  } catch (err) {
-    console.error('DETR failed:', err.message);
-    console.groupEnd();
-    throw err;
-  }
+  console.log(`Processed ${detections.length} detections`);
+  console.groupEnd();
+  return detections;
 }
 
-// FIXED: DINOv2 Embedding — WORKS NOV 2025
+// FIXED: DINOv2 Embedding via InferenceClient (2025)
 async function generateEmbeddingDINO(imageBuffer) {
-  const apiKey = process.env.HUGGINGFACE_API_KEY;
-  if (!apiKey) throw new Error('HUGGINGFACE_API_KEY missing');
-
-  const ENDPOINT = 'https://router.huggingface.co/hf-inference/models/facebook/dinov2-base/feature-extraction';
-
-  const response = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'image/jpeg',
-    },
-    body: imageBuffer,
+  const client = await getHFClient();
+  return await client.featureExtraction({
+    model: 'facebook/dinov2-base',
+    inputs: imageBuffer,
   });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`DINOv2 failed: ${response.status} ${err}`);
-  }
-
-  const data = await response.json();
-  if (data.error?.includes('loading')) {
-    await new Promise(r => setTimeout(r, 10000));
-    return generateEmbeddingDINO(imageBuffer);
-  }
-
-  return Array.isArray(data) ? data : data[0];
 }
 
-// FIXED: CLIP Embedding — WORKS NOV 2025
+// FIXED: CLIP Embedding via InferenceClient (2025)
 async function generateEmbeddingCLIP(imageBuffer) {
-  const apiKey = process.env.HUGGINGFACE_API_KEY;
-  if (!apiKey) throw new Error('HUGGINGFACE_API_KEY missing');
-
-  const ENDPOINT = 'https://router.huggingface.co/hf-inference/models/openai/clip-vit-large-patch14/feature-extraction';
-
-  const response = await fetch(ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${apiKey}`,
-      'Content-Type': 'image/jpeg',
-    },
-    body: imageBuffer,
+  const client = await getHFClient();
+  return await client.featureExtraction({
+    model: 'openai/clip-vit-large-patch14',
+    inputs: imageBuffer,
   });
-
-  if (!response.ok) {
-    const err = await response.text();
-    throw new Error(`CLIP failed: ${response.status} ${err}`);
-  }
-
-  const data = await response.json();
-  if (data.error?.includes('loading')) {
-    await new Promise(r => setTimeout(r, 10000));
-    return generateEmbeddingCLIP(imageBuffer);
-  }
-
-  return Array.isArray(data) ? data : data[0];
 }
 
 // OWLv2 is no longer reliably available on free Inference API
@@ -1762,9 +1708,9 @@ app.get('/api/health', (req, res) => {
     status: 'ok',
     visionApiConfigured: !!visionClient,
     huggingFaceConfigured: !!process.env.HUGGINGFACE_API_KEY,
+    detrModel: 'nielsr/detr-resnet-50 (2025 compatible)',
     catalogEmbeddingsCount: catalogEmbeddings.length,
     timestamp: new Date().toISOString(),
-    note: 'Using router.huggingface.co (2025 endpoints)',
   });
 });
 
@@ -1777,6 +1723,6 @@ app.get('/', (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-  console.log(`DETR Endpoint: https://router.huggingface.co/hf-inference/models/facebook/detr-resnet-50/object-detection`);
+  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  console.log(`✅ Using modern HF InferenceClient → nielsr/detr-resnet-50`);
 });
