@@ -149,47 +149,67 @@ async function detectProductsWithHuggingFace(imageBuffer) {
     // Use DETR model for object detection
     const model = 'facebook/detr-resnet-50';
     
-    // Try router endpoint first, fallback to legacy endpoint if 404
-    let apiUrl = `https://router.huggingface.co/models/${model}`;
+    // Try different router endpoint formats
+    // Note: router.huggingface.co may require different authentication or model availability
+    const routerFormats = [
+      `https://router.huggingface.co/models/${model}`,  // Standard router format
+      `https://api-inference.huggingface.co/models/${model}`,  // Legacy (deprecated, returns 410)
+    ];
     
     console.log('📡 Sending request to Hugging Face...');
-    console.log('   URL:', apiUrl);
     console.log('   Model:', model);
     
-    let response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'application/octet-stream',
-      },
-      body: imageBuffer,
-    });
+    let response;
+    let lastError;
+    
+    for (const apiUrl of routerFormats) {
+      try {
+        console.log(`   Trying URL: ${apiUrl}`);
+        
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'application/octet-stream',
+          },
+          body: imageBuffer,
+        });
 
-    console.log('📥 Response status:', response.status, response.statusText);
+        console.log(`   Response status: ${response.status} ${response.statusText}`);
 
-    // If router endpoint returns 404, try legacy endpoint
-    if (response.status === 404) {
-      console.log('   ⚠️  Router endpoint returned 404, trying legacy endpoint...');
-      apiUrl = `https://api-inference.huggingface.co/models/${model}`;
-      console.log('   Trying legacy URL:', apiUrl);
-      
-      response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'application/octet-stream',
-        },
-        body: imageBuffer,
-      });
-      
-      console.log('📥 Legacy endpoint response status:', response.status, response.statusText);
+        // If we get 410 (Gone), skip this format
+        if (response.status === 410) {
+          console.log('   ⚠️  Endpoint returned 410 (deprecated), trying next format...');
+          continue;
+        }
+
+        // If we get 404, try next format
+        if (response.status === 404) {
+          console.log('   ⚠️  Endpoint returned 404, trying next format...');
+          continue;
+        }
+
+        // If successful or other error, break
+        break;
+      } catch (fetchError) {
+        console.log(`   ⚠️  Fetch error: ${fetchError.message}, trying next format...`);
+        lastError = fetchError;
+        continue;
+      }
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
+    // Check if we got a valid response
+    if (!response || !response.ok) {
+      const errorText = response ? await response.text() : (lastError?.message || 'All endpoints failed');
       console.error('❌ Hugging Face API error response:', errorText);
       console.groupEnd();
-      throw new Error(`Hugging Face API error: ${response.status} ${errorText}`);
+      
+      // Provide helpful error message
+      if (response?.status === 404) {
+        throw new Error(`Model ${model} not found or not available via Inference API. Please check: 1) Model exists at https://huggingface.co/${model}, 2) Model supports Inference API, 3) Your API token has access. Error: ${errorText}`);
+      }
+      
+      throw new Error(`Hugging Face API error: ${response?.status || 'NETWORK'} ${errorText}`);
     }
 
     const data = await response.json();
@@ -437,35 +457,42 @@ async function generateEmbeddingDINO(imageBuffer) {
   console.log('🧬 Generating DINOv2 embedding');
   
   try {
-    // Try router endpoint first, fallback to legacy endpoint if 404
-    let apiUrl = `https://router.huggingface.co/models/${model}`;
+    // Try different endpoint formats
+    const endpointFormats = [
+      `https://router.huggingface.co/models/${model}`,
+      `https://api-inference.huggingface.co/models/${model}`,  // Legacy (may return 410)
+    ];
     
-    let response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'image/jpeg',
-      },
-      body: imageBuffer,
-    });
+    let response;
+    let lastError;
+    
+    for (const apiUrl of endpointFormats) {
+      try {
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'image/jpeg',
+          },
+          body: imageBuffer,
+        });
 
-    // If router endpoint returns 404, try legacy endpoint
-    if (response.status === 404) {
-      console.log('   ⚠️  Router endpoint returned 404, trying legacy endpoint...');
-      apiUrl = `https://api-inference.huggingface.co/models/${model}`;
-      response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'image/jpeg',
-        },
-        body: imageBuffer,
-      });
+        // Skip if deprecated (410) or not found (404)
+        if (response.status === 410 || response.status === 404) {
+          continue;
+        }
+
+        // If successful or other error, break
+        break;
+      } catch (fetchError) {
+        lastError = fetchError;
+        continue;
+      }
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`DINOv2 API error: ${response.status} ${errorText}`);
+    if (!response || !response.ok) {
+      const errorText = response ? await response.text() : (lastError?.message || 'All endpoints failed');
+      throw new Error(`DINOv2 API error: ${response?.status || 'NETWORK'} ${errorText}`);
     }
 
     const embedding = await response.json();
@@ -504,35 +531,42 @@ async function generateEmbeddingCLIP(imageBuffer) {
   console.log('🖼️ Generating CLIP embedding');
   
   try {
-    // Try router endpoint first, fallback to legacy endpoint if 404
-    let apiUrl = `https://router.huggingface.co/models/${model}`;
+    // Try different endpoint formats
+    const endpointFormats = [
+      `https://router.huggingface.co/models/${model}`,
+      `https://api-inference.huggingface.co/models/${model}`,  // Legacy (may return 410)
+    ];
     
-    let response = await fetch(apiUrl, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${apiKey}`,
-        'Content-Type': 'image/jpeg',
-      },
-      body: imageBuffer,
-    });
+    let response;
+    let lastError;
+    
+    for (const apiUrl of endpointFormats) {
+      try {
+        response = await fetch(apiUrl, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${apiKey}`,
+            'Content-Type': 'image/jpeg',
+          },
+          body: imageBuffer,
+        });
 
-    // If router endpoint returns 404, try legacy endpoint
-    if (response.status === 404) {
-      console.log('   ⚠️  Router endpoint returned 404, trying legacy endpoint...');
-      apiUrl = `https://api-inference.huggingface.co/models/${model}`;
-      response = await fetch(apiUrl, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-          'Content-Type': 'image/jpeg',
-        },
-        body: imageBuffer,
-      });
+        // Skip if deprecated (410) or not found (404)
+        if (response.status === 410 || response.status === 404) {
+          continue;
+        }
+
+        // If successful or other error, break
+        break;
+      } catch (fetchError) {
+        lastError = fetchError;
+        continue;
+      }
     }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`CLIP API error: ${response.status} ${errorText}`);
+    if (!response || !response.ok) {
+      const errorText = response ? await response.text() : (lastError?.message || 'All endpoints failed');
+      throw new Error(`CLIP API error: ${response?.status || 'NETWORK'} ${errorText}`);
     }
 
     const embedding = await response.json();
