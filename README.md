@@ -1,203 +1,193 @@
-# Shop Mini Backend API
+# Conversational Shopping Assistant Backend
 
-Backend server for Shop Mini that handles Google Cloud Vision API calls with OAuth2 authentication.
+Backend API server for the AOVBoost-style conversational shopping assistant Shop Mini.
 
 ## Features
 
-- ✅ Google Cloud Vision API integration with OAuth2 (service account)
-- ✅ Product detection with bounding boxes
+- ✅ AI-powered conversational responses (Claude API or fallback)
+- ✅ Intelligent product recommendations based on conversation
+- ✅ Complementary product suggestions for upselling
 - ✅ CORS enabled for frontend access
 - ✅ Health check endpoint
-- ✅ Error handling and helpful error messages
 
 ## Prerequisites
 
-1. **Google Cloud Project** with Vision API enabled
-2. **Service Account** with Vision API permissions
-3. **Node.js** 18+ installed
+1. **Node.js** 18+ installed
+2. **Claude API Key** (optional, for enhanced AI responses)
 
 ## Setup Instructions
 
-### 1. Create Google Cloud Service Account
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com/)
-2. Create a new project or select an existing one
-3. Enable the **Cloud Vision API**:
-   - Navigate to "APIs & Services" > "Library"
-   - Search for "Cloud Vision API"
-   - Click "Enable"
-
-4. Create a Service Account:
-   - Go to "APIs & Services" > "Credentials"
-   - Click "Create Credentials" > "Service Account"
-   - Give it a name (e.g., "vision-api-service")
-   - Grant it the role: **"Cloud Vision API User"**
-   - Click "Done"
-
-5. Create a Key:
-   - Click on the service account you just created
-   - Go to "Keys" tab
-   - Click "Add Key" > "Create new key"
-   - Choose "JSON" format
-   - Download the JSON file
-   - **Save it as `service-account-key.json` in the `backend` directory**
-
-### 2. Install Dependencies
+### 1. Install Dependencies
 
 ```bash
 cd backend
 npm install
 ```
 
-### 3. Configure Environment Variables
+### 2. Environment Variables
 
-Copy the example environment file:
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env` and set the path to your service account key:
+Create a `.env` file in the `backend` directory:
 
 ```env
-GOOGLE_APPLICATION_CREDENTIALS=./service-account-key.json
 PORT=3000
+CLAUDE_API_KEY=your_claude_api_key_optional
+HUGGINGFACE_API_KEY=optional_for_future_features
 ```
 
-### 4. Start the Server
+### 3. Start the Server
 
-**Development mode (with auto-reload):**
-```bash
-npm run dev
-```
-
-**Production mode:**
 ```bash
 npm start
 ```
 
-The server will start on `http://localhost:3000`
+Or for development with auto-reload:
 
-### 5. Test the Server
-
-**Health check:**
 ```bash
-curl http://localhost:3000/api/health
-```
-
-**Product detection (example):**
-```bash
-curl -X POST http://localhost:3000/api/detect-products \
-  -H "Content-Type: application/json" \
-  -d '{"image":"data:image/jpeg;base64,/9j/4AAQSkZJRg..."}'
-```
-
-## Frontend Configuration
-
-In your frontend `.env` file, set:
-
-```env
-VITE_BACKEND_URL=http://localhost:3000
-VITE_RECOGNITION_PROVIDER=backend
-```
-
-Or for production:
-
-```env
-VITE_BACKEND_URL=https://trendy-backend-production.up.railway.app
-VITE_RECOGNITION_PROVIDER=backend
-```
-
-## Deployment Options
-
-### Option 1: Deploy to Vercel (Serverless Functions)
-
-1. Create `vercel.json` in the backend directory:
-```json
-{
-  "version": 2,
-  "builds": [
-    {
-      "src": "server.js",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "server.js"
-    }
-  ]
-}
-```
-
-2. Set environment variables in Vercel dashboard:
-   - `GOOGLE_SERVICE_ACCOUNT_JSON` = (paste entire JSON content)
-   - `PORT` = 3000 (optional)
-
-3. Deploy:
-```bash
-vercel
-```
-
-### Option 2: Deploy to Railway/Render/Heroku
-
-1. Set environment variables:
-   - `GOOGLE_SERVICE_ACCOUNT_JSON` = (paste entire JSON content)
-   - `PORT` = (auto-set by platform)
-
-2. Deploy your code
-
-### Option 3: Deploy to Google Cloud Run
-
-1. Create `Dockerfile`:
-```dockerfile
-FROM node:18-alpine
-WORKDIR /app
-COPY package*.json ./
-RUN npm ci --only=production
-COPY . .
-EXPOSE 3000
-CMD ["node", "server.js"]
-```
-
-2. Build and deploy:
-```bash
-gcloud builds submit --tag gcr.io/YOUR_PROJECT_ID/shopmini-backend
-gcloud run deploy shopmini-backend --image gcr.io/YOUR_PROJECT_ID/shopmini-backend
+npm run dev
 ```
 
 ## API Endpoints
 
-### POST `/api/detect-products`
+### POST `/api/ai/chat`
 
-Detects products in an uploaded image.
+Generates conversational responses.
 
 **Request:**
 ```json
 {
-  "image": "data:image/jpeg;base64,..."
+  "message": "I'm looking for running shoes",
+  "conversationHistory": [...],
+  "currentProducts": []
 }
 ```
 
 **Response:**
 ```json
 {
-  "detections": [
+  "response": "I'd be happy to help you find running shoes!"
+}
+```
+
+### POST `/api/ai/recommend`
+
+Gets product recommendations based on conversation.
+
+**Request:**
+```json
+{
+  "message": "running shoes",
+  "availableProducts": [...],
+  "userPreferences": {}
+}
+```
+
+**Response:**
+```json
+{
+  "recommendations": [
     {
-      "id": "gv-obj-0",
-      "name": "Watch",
-      "category": "watch",
-      "confidence": 0.94,
-      "boundingBox": {
-        "x": 25,
-        "y": 40,
-        "width": 20,
-        "height": 15
-      },
-      "attributes": {}
+      "product": {...},
+      "reason": "Matches your search",
+      "confidence": 0.85
     }
   ]
+}
+```
+
+### POST `/api/ai/complementary`
+
+Gets complementary products for upselling.
+
+**Request:**
+```json
+{
+  "product": {...},
+  "availableProducts": [...]
+}
+```
+
+**Response:**
+```json
+{
+  "recommendations": [
+    {
+      "product": {...},
+      "reason": "Pairs well with...",
+      "confidence": 0.75
+    }
+  ]
+}
+```
+
+### POST `/api/upsell` (NEW - From Ai-agent-main)
+
+AI-powered upsell suggestions based on cart items. Supports multiple AI services (Gemini, Groq, Claude) with intelligent fallback.
+
+**Request:**
+```json
+{
+  "cartItems": [
+    {
+      "id": "variant-123",
+      "variant_id": "variant-123",
+      "title": "Product Name",
+      "price": "29.99",
+      "quantity": 1
+    }
+  ],
+  "availableProducts": [
+    {
+      "id": "variant-456",
+      "title": "Upsell Product",
+      "price": "19.99",
+      "image": "https://...",
+      "handle": "upsell-product"
+    }
+  ]
+}
+```
+
+**Response:**
+```json
+{
+  "suggestion": {
+    "id": "variant-456",
+    "title": "Upsell Product",
+    "price": "19.99",
+    "image": "https://...",
+    "message": "Perfect timing! This product complements your cart perfectly...",
+    "reasoning": "AI analysis shows high compatibility"
+  }
+}
+```
+
+**Environment Variables:**
+- `GOOGLE_API_KEY` - For Gemini AI
+- `GROQ_API_KEY` - For Groq AI (Llama models)
+- `CLAUDE_API_KEY` - For Claude AI
+
+### POST `/api/upsell/track` (NEW - From Ai-agent-main)
+
+Tracks upsell events for analytics.
+
+**Request:**
+```json
+{
+  "event": "upsell_impression" | "upsell_add_to_cart" | "conversion",
+  "timestamp": "2025-01-21T10:00:00Z",
+  "data": {
+    "id": "variant-123",
+    "title": "Product Name",
+    "price": "29.99"
+  },
+  "shop": "your-shop.myshopify.com"
+}
+```
+
+**Response:**
+```json
+{
+  "success": true
 }
 ```
 
@@ -208,36 +198,36 @@ Health check endpoint.
 **Response:**
 ```json
 {
-  "status": "ok",
-  "visionApiConfigured": true,
-  "timestamp": "2024-01-01T00:00:00.000Z"
+  "status": "OK",
+  "app": "Conversational Shopping Assistant",
+  "endpoints": {...}
 }
 ```
 
-## Troubleshooting
+## Testing
 
-### Error: "API keys are not supported"
-- **Solution**: Make sure you're using a service account JSON key, not an API key
-- Set `GOOGLE_APPLICATION_CREDENTIALS` to point to your service account JSON file
+Test the API using curl:
 
-### Error: "Permission denied"
-- **Solution**: Make sure your service account has the "Cloud Vision API User" role
-- Check that the Vision API is enabled in your Google Cloud project
+```bash
+# Health check
+curl http://localhost:3000/api/health
 
-### Error: "Cannot find module '@google-cloud/vision'"
-- **Solution**: Run `npm install` in the backend directory
+# Chat endpoint
+curl -X POST http://localhost:3000/api/ai/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello"}'
+```
 
-### CORS errors
-- **Solution**: The server has CORS enabled by default. If you need to restrict origins, modify the CORS configuration in `server.js`
+## Deployment
 
-## Security Notes
+The backend can be deployed to:
+- Railway
+- Vercel (serverless functions)
+- Heroku
+- Any Node.js hosting platform
 
-- ⚠️ **Never commit** your `service-account-key.json` file to version control
-- ⚠️ Add `service-account-key.json` to `.gitignore`
-- ✅ Use environment variables for cloud deployments
-- ✅ Restrict service account permissions to only what's needed
+Make sure to set environment variables in your hosting platform's dashboard.
 
 ## License
 
 MIT
-
