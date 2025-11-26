@@ -2083,6 +2083,7 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const agentUrl = process.env.AGENT_URL || 'localhost://3000';
 
 app.use(cors({ origin: '*' }));
 app.use(express.json({ limit: '10mb' }));
@@ -2341,7 +2342,7 @@ app.get('/', (req, res) => {
  * Enhanced AI Upsell endpoint with multiple AI service support
  * Transferred from Ai-agent-main Remix app
  */
-app.post('https://ai-agent-plum-eight.vercel.app/api/upsell', async (req, res) => {
+app.post(`${agentUrl}/api/upsell`, async (req, res) => {
   const corsHeaders = {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
