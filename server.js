@@ -2134,7 +2134,7 @@ const mapLabelToCategory = (label) => {
 /**
  * AI Chat endpoint - generates conversational responses
  */
-app.post('/api/ai/chat', async (req, res) => {
+app.post('/api/upsell', async (req, res) => {
   try {
     const { message, conversationHistory, currentProducts } = req.body;
     
