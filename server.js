@@ -329,7 +329,7 @@ app.post('/api/upsell', async (req, res) => {
     const productContext = filteredProducts.map(p => ({
       id: p.id,
       title: p.title,
-      price: p.price,
+      price: p.price.amount,
       image: p.image?.src || p.image || p.imageUrl,
       handle: p.handle || ''
     }));
